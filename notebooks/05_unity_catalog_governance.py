@@ -1,14 +1,14 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # 05 - Unity Catalog Governance
-# MAGIC 
+# MAGIC
 # MAGIC This notebook demonstrates Unity Catalog features for enterprise governance:
 # MAGIC - **Catalog/Schema/Table hierarchy** management
 # MAGIC - **Fine-grained access control** (table, column, row-level)
 # MAGIC - **Data lineage** tracking
 # MAGIC - **Data discovery** and tagging
 # MAGIC - **Audit logging** and compliance
-# MAGIC 
+# MAGIC
 # MAGIC **Prerequisite**: Unity Catalog must be enabled in your workspace
 
 # COMMAND ----------
@@ -76,7 +76,7 @@ CONFIG = {
 # MAGIC -- Example: Analysts can read from gold, not bronze
 # MAGIC -- GRANT USAGE ON SCHEMA sourcefuse_poc.gold TO `data_analysts`;
 # MAGIC -- GRANT SELECT ON SCHEMA sourcefuse_poc.gold TO `data_analysts`;
-# MAGIC 
+# MAGIC
 # MAGIC -- Data scientists get silver access too
 # MAGIC -- GRANT USAGE ON SCHEMA sourcefuse_poc.silver TO `data_scientists`;
 # MAGIC -- GRANT SELECT ON SCHEMA sourcefuse_poc.silver TO `data_scientists`;
@@ -99,33 +99,35 @@ CONFIG = {
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 16
 # MAGIC %sql
+# MAGIC     
 # MAGIC -- Create a secure view that masks PII based on user group
 # MAGIC CREATE OR REPLACE VIEW sourcefuse_poc.gold.v_customer_360_secure AS
 # MAGIC SELECT 
-# MAGIC     customer_id,
+# MAGIC     c.customer_id,
 # MAGIC     -- Mask email for non-admin users
 # MAGIC     CASE 
-# MAGIC         WHEN is_account_group_member('data_admins') THEN email
-# MAGIC         ELSE CONCAT(SUBSTRING(email, 1, 3), '***@', SPLIT(email, '@')[1])
+# MAGIC         WHEN is_account_group_member('data_admins') THEN c.email
+# MAGIC         ELSE CONCAT(SUBSTRING(c.email, 1, 3), '***@', SPLIT(c.email, '@')[1])
 # MAGIC     END as email,
 # MAGIC     -- Mask phone for non-admin users
 # MAGIC     CASE 
-# MAGIC         WHEN is_account_group_member('data_admins') THEN phone
-# MAGIC         ELSE CONCAT('***-***-', RIGHT(phone, 4))
+# MAGIC         WHEN is_account_group_member('data_admins') THEN c.phone
+# MAGIC         ELSE CONCAT('***-***-', RIGHT(c.phone, 4))
 # MAGIC     END as phone,
-# MAGIC     first_name,
-# MAGIC     last_name,
-# MAGIC     state,
-# MAGIC     customer_segment,
-# MAGIC     tenure_category,
+# MAGIC     c.first_name,
+# MAGIC     c.last_name,
+# MAGIC     c.state,
+# MAGIC     c.customer_segment,
+# MAGIC     c.tenure_category,
 # MAGIC     -- These metrics are fine for all users
-# MAGIC     total_transactions,
-# MAGIC     total_spend,
-# MAGIC     avg_order_value,
-# MAGIC     rfm_score,
-# MAGIC     value_segment,
-# MAGIC     preferred_channel
+# MAGIC     c360.total_transactions,
+# MAGIC     c360.total_spend,
+# MAGIC     c360.avg_order_value,
+# MAGIC     c360.rfm_score,
+# MAGIC     c360.value_segment,
+# MAGIC     c360.preferred_channel
 # MAGIC FROM sourcefuse_poc.silver.customers c
 # MAGIC JOIN sourcefuse_poc.gold.customer_360 c360 ON c.customer_id = c360.customer_id;
 
@@ -246,9 +248,9 @@ CONFIG = {
 
 # MAGIC %md
 # MAGIC ### View Table Lineage (UI Feature)
-# MAGIC 
+# MAGIC
 # MAGIC Navigate to **Data Explorer** → Select a table → Click **Lineage** tab
-# MAGIC 
+# MAGIC
 # MAGIC This shows:
 # MAGIC - Upstream dependencies (source tables)
 # MAGIC - Downstream dependencies (derived tables)
@@ -361,32 +363,36 @@ def gdpr_delete_customer(customer_id):
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 49
 # MAGIC %sql
+# MAGIC     
 # MAGIC -- Find all tables with PII
 # MAGIC SELECT 
-# MAGIC     table_catalog,
-# MAGIC     table_schema,
+# MAGIC     catalog_name,
+# MAGIC     schema_name,
 # MAGIC     table_name,
 # MAGIC     tag_name,
 # MAGIC     tag_value
 # MAGIC FROM system.information_schema.table_tags
-# MAGIC WHERE table_catalog = 'sourcefuse_poc'
+# MAGIC WHERE catalog_name = 'sourcefuse_poc'
 # MAGIC   AND tag_name = 'pii'
 # MAGIC   AND tag_value = 'true';
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 50
 # MAGIC %sql
+# MAGIC     
 # MAGIC -- Find all columns tagged as PII
 # MAGIC SELECT 
-# MAGIC     table_catalog,
-# MAGIC     table_schema,
+# MAGIC     catalog_name,
+# MAGIC     schema_name,
 # MAGIC     table_name,
 # MAGIC     column_name,
 # MAGIC     tag_name,
 # MAGIC     tag_value
 # MAGIC FROM system.information_schema.column_tags
-# MAGIC WHERE table_catalog = 'sourcefuse_poc'
+# MAGIC WHERE catalog_name = 'sourcefuse_poc'
 # MAGIC   AND tag_name = 'pii';
 
 # COMMAND ----------
@@ -394,11 +400,11 @@ def gdpr_delete_customer(customer_id):
 # MAGIC %sql
 # MAGIC -- Search for tables by domain
 # MAGIC SELECT 
-# MAGIC     table_schema,
+# MAGIC     schema_name,
 # MAGIC     table_name,
 # MAGIC     tag_value as domain
 # MAGIC FROM system.information_schema.table_tags
-# MAGIC WHERE table_catalog = 'sourcefuse_poc'
+# MAGIC WHERE catalog_name = 'sourcefuse_poc'
 # MAGIC   AND tag_name = 'domain'
 # MAGIC ORDER BY tag_value, table_name;
 
@@ -431,13 +437,14 @@ print(f"  Tables (bronze/silver/gold): {tables}")
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 54
 # Check for tables with tags
 tagged_tables = spark.sql("""
     SELECT 
         tag_name,
-        COUNT(DISTINCT CONCAT(table_schema, '.', table_name)) as table_count
+        COUNT(DISTINCT CONCAT(schema_name, '.', table_name)) as table_count
     FROM system.information_schema.table_tags
-    WHERE table_catalog = 'sourcefuse_poc'
+    WHERE catalog_name = 'sourcefuse_poc'
     GROUP BY tag_name
 """)
 
@@ -449,7 +456,7 @@ for row in tagged_tables.collect():
 
 # MAGIC %md
 # MAGIC ## Governance Best Practices Checklist
-# MAGIC 
+# MAGIC
 # MAGIC - [ ] **Catalog Structure**: Organize by environment (dev/staging/prod) or domain
 # MAGIC - [ ] **Access Control**: Use groups, not individual users
 # MAGIC - [ ] **PII Protection**: Implement column masking for sensitive data

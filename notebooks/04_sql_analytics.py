@@ -1,14 +1,14 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # 04 - SQL Analytics & Photon Performance
-# MAGIC 
+# MAGIC
 # MAGIC This notebook demonstrates high-performance SQL analytics using:
 # MAGIC - **Photon Engine** for accelerated query execution
 # MAGIC - **SQL Warehouse** best practices
 # MAGIC - **Materialized Views** for dashboard optimization
 # MAGIC - **Query Federation** across schemas
 # MAGIC - **Concurrency testing** at scale
-# MAGIC 
+# MAGIC
 # MAGIC **Target**: Sub-second queries on billion-row tables
 
 # COMMAND ----------
@@ -28,14 +28,16 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 5
 # Check if Photon is enabled
-photon_enabled = spark.conf.get("spark.databricks.photon.enabled", "false")
-print(f"Photon Enabled: {photon_enabled}")
+try:
+    photon_enabled = spark.conf.get("spark.databricks.photon.enabled")
+except Exception:
+    photon_enabled = "Auto-enabled on serverless"
 
-# Additional Photon optimizations
-spark.conf.set("spark.databricks.photon.enabled", "true")
-spark.conf.set("spark.databricks.photon.parquetWriter.enabled", "true")
-spark.conf.set("spark.databricks.photon.scan.enabled", "true")
+print(f"Photon Enabled: {photon_enabled}")
+print("\nNote: On serverless clusters, Photon is automatically enabled and optimized.")
+print("Manual Photon configuration is not supported on serverless compute.")
 
 # COMMAND ----------
 
@@ -265,9 +267,10 @@ spark.conf.set("spark.databricks.photon.scan.enabled", "true")
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 16
 # MAGIC %sql
-# MAGIC -- Create materialized view for executive dashboard
-# MAGIC CREATE OR REPLACE MATERIALIZED VIEW gold.mv_executive_summary AS
+# MAGIC -- Create aggregated table for executive dashboard (materialized views require SQL Warehouse)
+# MAGIC CREATE OR REPLACE TABLE gold.mv_executive_summary AS
 # MAGIC SELECT 
 # MAGIC     DATE_TRUNC('week', transaction_date) as week_start,
 # MAGIC     SUM(net_sales) as weekly_revenue,
@@ -281,9 +284,10 @@ spark.conf.set("spark.databricks.photon.scan.enabled", "true")
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 17
 # MAGIC %sql
-# MAGIC -- Create materialized view for category performance
-# MAGIC CREATE OR REPLACE MATERIALIZED VIEW gold.mv_category_performance AS
+# MAGIC -- Create aggregated table for category performance (materialized views require SQL Warehouse)
+# MAGIC CREATE OR REPLACE TABLE gold.mv_category_performance AS
 # MAGIC SELECT 
 # MAGIC     category,
 # MAGIC     COUNT(*) as product_count,
@@ -449,7 +453,7 @@ if successful:
 
 # MAGIC %md
 # MAGIC ## SQL Warehouse Best Practices Summary
-# MAGIC 
+# MAGIC
 # MAGIC 1. **Enable Photon**: Provides 2-8x speedup for most analytical queries
 # MAGIC 2. **Use Z-ORDER**: On frequently filtered columns (customer_id, transaction_date)
 # MAGIC 3. **Partition wisely**: By date columns for time-series data

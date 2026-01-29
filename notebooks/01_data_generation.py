@@ -1,14 +1,14 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # 01 - Synthetic Data Generation
-# MAGIC 
+# MAGIC
 # MAGIC This notebook generates high-volume synthetic data for the retail POC:
 # MAGIC - **Products**: 100K products across categories
 # MAGIC - **Customers**: 10M customers
 # MAGIC - **Transactions**: 500M+ historical transactions
 # MAGIC - **Clickstream**: Real-time event simulation data
 # MAGIC - **Inventory**: Warehouse inventory snapshots
-# MAGIC 
+# MAGIC
 # MAGIC **Target Volume**: ~50-100GB raw data
 
 # COMMAND ----------

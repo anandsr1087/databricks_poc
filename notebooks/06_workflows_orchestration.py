@@ -1,7 +1,7 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # 06 - Databricks Workflows Orchestration
-# MAGIC 
+# MAGIC
 # MAGIC This notebook demonstrates workflow orchestration using:
 # MAGIC - **Databricks Workflows** for job orchestration
 # MAGIC - **Task dependencies** and parallel execution
@@ -9,14 +9,14 @@
 # MAGIC - **Parameterization** and **dynamic configuration**
 # MAGIC - **Error handling** and **retry logic**
 # MAGIC - **Monitoring** and **alerting**
-# MAGIC 
+# MAGIC
 # MAGIC This notebook provides workflow configurations to be used in the Databricks Workflows UI or via the Jobs API.
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Workflow Architecture Overview
-# MAGIC 
+# MAGIC
 # MAGIC ```
 # MAGIC ┌─────────────────────────────────────────────────────────────────┐
 # MAGIC │                    RETAIL POC WORKFLOW                         │
@@ -422,11 +422,11 @@ print(json.dumps(maintenance_workflow, indent=2))
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 11
 # This would be in a separate notebook (e.g., etl_task_template.py)
 # Demonstrates how to make notebooks workflow-ready with parameters
 
 etl_template = '''
-# Databricks notebook source
 # Get task parameters
 dbutils.widgets.text("layer", "silver", "Target Layer")
 dbutils.widgets.text("table", "", "Table Name")
@@ -437,12 +437,29 @@ table = dbutils.widgets.get("table")
 run_date = dbutils.widgets.get("run_date") or str(date.today())
 
 print(f"Processing: {layer}.{table} for {run_date}")
+'''
+
+print("ETL Template Notebook:")
+print(etl_template)
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 12
 # Define ETL logic based on parameters
-from datetime import date
+from datetime import date, datetime
 from pyspark.sql import functions as F
+
+# Get parameters from widgets (for workflow execution)
+# For demonstration, set default values
+try:
+    dbutils.widgets.text("layer", "silver", "Target Layer")
+    dbutils.widgets.text("table", "customers", "Table Name")
+    layer = dbutils.widgets.get("layer")
+    table = dbutils.widgets.get("table")
+except:
+    # Fallback for non-workflow execution
+    layer = "silver"
+    table = "customers"
 
 catalog = "sourcefuse_poc"
 
@@ -453,11 +470,12 @@ if layer == "silver" and table == "customers":
     silver_df = (
         bronze_df
         .withColumn("email", F.lower(F.trim("email")))
+        .withColumn("dq_score", F.lit(100.0))  # Use DOUBLE to match table schema
         .withColumn("silver_processed_at", F.current_timestamp())
     )
     
-    silver_df.write.format("delta") \\
-        .mode("overwrite") \\
+    silver_df.write.format("delta") \
+        .mode("overwrite") \
         .saveAsTable(f"{catalog}.silver.customers")
     
     print(f"✅ Processed {silver_df.count():,} customers")
@@ -467,8 +485,13 @@ elif layer == "gold" and table == "customer_360":
     # ... implementation
     pass
 
+else:
+    print(f"⚠️ No ETL logic defined for {layer}.{table}")
+
 # COMMAND ----------
 
+# DBTITLE 1,Cell 13
+from datetime import date, datetime
 # Return success status for workflow
 dbutils.notebook.exit(json.dumps({
     "status": "success",
@@ -477,7 +500,6 @@ dbutils.notebook.exit(json.dumps({
     "rows_processed": silver_df.count() if 'silver_df' in dir() else 0,
     "timestamp": str(datetime.now())
 }))
-'''
 
 print("ETL Template Notebook:")
 print(etl_template)
@@ -623,7 +645,7 @@ def check_sla_and_alert(job_name, max_duration_minutes, actual_duration_minutes,
 
 # MAGIC %md
 # MAGIC ## Workflow Best Practices Summary
-# MAGIC 
+# MAGIC
 # MAGIC 1. **Use Job Clusters**: Cheaper than all-purpose clusters, isolated environments
 # MAGIC 2. **Parameterize Notebooks**: Make tasks reusable with widgets/parameters
 # MAGIC 3. **Implement Retries**: Configure retry logic for transient failures

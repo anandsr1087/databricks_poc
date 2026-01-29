@@ -1,14 +1,14 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # 03 - Batch ETL Pipeline (Medallion Architecture)
-# MAGIC 
+# MAGIC
 # MAGIC This notebook demonstrates heavy batch processing using:
 # MAGIC - **Bronze → Silver → Gold** medallion architecture
 # MAGIC - **Delta Lake** optimizations (OPTIMIZE, Z-ORDER, VACUUM)
 # MAGIC - **Change Data Feed** for incremental processing
 # MAGIC - **Merge (Upsert)** operations at scale
 # MAGIC - **Data quality** validation
-# MAGIC 
+# MAGIC
 # MAGIC **Target**: Process 100M+ rows with complex transformations
 
 # COMMAND ----------
@@ -18,6 +18,7 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 3
 CONFIG = {
     "catalog": "sourcefuse_poc",
     "bronze_schema": "bronze",
@@ -25,12 +26,16 @@ CONFIG = {
     "gold_schema": "gold"
 }
 
-spark.sql(f"USE CATALOG {CONFIG['database']}")
+spark.sql(f"USE CATALOG {CONFIG['catalog']}")
 
-# Enable optimizations
-spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "true")
-spark.conf.set("spark.databricks.delta.autoCompact.enabled", "true")
+# Configure shuffle partitions (supported on serverless)
 spark.conf.set("spark.sql.shuffle.partitions", "200")
+
+# Note: optimizeWrite and autoCompact are automatically enabled on serverless clusters
+print("✅ Configuration set")
+print("   Catalog: sourcefuse_poc")
+print("   Shuffle partitions: 200")
+print("   Delta optimizations: Auto-enabled on serverless")
 
 # COMMAND ----------
 
@@ -44,11 +49,12 @@ spark.conf.set("spark.sql.shuffle.partitions", "200")
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 6
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 # Read bronze customers
-bronze_customers = spark.table(f"{CONFIG['database']}.customers")
+bronze_customers = spark.table(f"{CONFIG['catalog']}.{CONFIG['bronze_schema']}.customers")
 
 # Data quality rules and transformations
 silver_customers = (
@@ -108,7 +114,7 @@ silver_customers = (
 silver_customers.write.format("delta") \
     .mode("overwrite") \
     .option("overwriteSchema", "true") \
-    .saveAsTable(f"{CONFIG['database']}.customers")
+    .saveAsTable(f"{CONFIG['catalog']}.{CONFIG['silver_schema']}.customers")
 
 # Data quality summary
 dq_summary = silver_customers.agg(
@@ -131,11 +137,12 @@ print(f"   Avg DQ Score: {dq_summary['avg_dq_score']:.1f}%")
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 8
 # Read bronze transactions
-bronze_transactions = spark.table(f"{CONFIG['database']}.transactions")
+bronze_transactions = spark.table(f"{CONFIG['catalog']}.{CONFIG['bronze_schema']}.transactions")
 
 # Read line items for aggregation
-bronze_line_items = spark.table(f"{CONFIG['database']}.transaction_line_items")
+bronze_line_items = spark.table(f"{CONFIG['catalog']}.{CONFIG['bronze_schema']}.transaction_line_items")
 
 # Aggregate line items to transaction level
 transaction_totals = (
@@ -143,10 +150,10 @@ transaction_totals = (
     .groupBy("transaction_id")
     .agg(
         F.sum("line_total").alias("calculated_total"),
-        F.sum("quantity").alias("total_items"),
-        F.count("*").alias("line_item_count"),
-        F.avg("discount_percent").alias("avg_discount"),
-        F.max("discount_percent").alias("max_discount")
+        F.sum("quantity").alias("calculated_total_items"),
+        F.count("*").alias("calculated_line_items"),
+        F.avg("discount_percent").alias("calculated_avg_discount"),
+        F.max("discount_percent").alias("calculated_max_discount")
     )
 )
 
@@ -182,14 +189,15 @@ silver_transactions = (
          .otherwise("XLarge ($500+)"))
     
     # Data quality flags
-    .withColumn("dq_has_items", F.col("line_item_count") > 0)
+    .withColumn("dq_has_items", F.col("calculated_line_items") > 0)
     .withColumn("dq_valid_amount", F.col("transaction_amount") > 0)
-    .withColumn("dq_consistent_items", F.col("line_item_count") == F.col("num_items"))
+    .withColumn("dq_consistent_items", F.col("calculated_line_items") == F.col("num_items"))
     
     # Processing metadata
     .withColumn("silver_processed_at", F.current_timestamp())
     
-    .drop("calculated_total")
+    # Drop conflicting columns from bronze and temporary calculated columns
+    .drop("calculated_total", "total_items", "avg_discount", "max_discount")
 )
 
 # Write to silver (partitioned for performance)
@@ -198,7 +206,7 @@ silver_transactions.repartition(200, "year_month") \
     .mode("overwrite") \
     .partitionBy("year_month") \
     .option("overwriteSchema", "true") \
-    .saveAsTable(f"{CONFIG['database']}.transactions")
+    .saveAsTable(f"{CONFIG['catalog']}.{CONFIG['silver_schema']}.transactions")
 
 print(f"✅ Silver Transactions Created: {silver_transactions.count():,} records")
 
@@ -209,11 +217,12 @@ print(f"✅ Silver Transactions Created: {silver_transactions.count():,} records
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 10
 # Read bronze products
-bronze_products = spark.table(f"{CONFIG['database']}.products")
+bronze_products = spark.table(f"{CONFIG['catalog']}.{CONFIG['bronze_schema']}.products")
 
 # Read transaction line items for product metrics
-bronze_line_items = spark.table(f"{CONFIG['database']}.transaction_line_items")
+bronze_line_items = spark.table(f"{CONFIG['catalog']}.{CONFIG['bronze_schema']}.transaction_line_items")
 
 # Calculate product performance metrics
 product_metrics = (
@@ -276,7 +285,7 @@ silver_products = (
 silver_products.write.format("delta") \
     .mode("overwrite") \
     .option("overwriteSchema", "true") \
-    .saveAsTable(f"{CONFIG['database']}.products")
+    .saveAsTable(f"{CONFIG['catalog']}.{CONFIG['silver_schema']}.products")
 
 print(f"✅ Silver Products Created: {silver_products.count():,} records")
 
@@ -292,9 +301,9 @@ print(f"✅ Silver Products Created: {silver_products.count():,} records")
 
 # COMMAND ----------
 
-silver_transactions = spark.table(f"{CONFIG['database']}.transactions")
-silver_products = spark.table(f"{CONFIG['database']}.products")
-bronze_line_items = spark.table(f"{CONFIG['database']}.transaction_line_items")
+silver_transactions = spark.table(f"{CONFIG['catalog']}.{CONFIG['silver_schema']}.transactions")
+silver_products = spark.table(f"{CONFIG['catalog']}.{CONFIG['silver_schema']}.products")
+bronze_line_items = spark.table(f"{CONFIG['catalog']}.{CONFIG['bronze_schema']}.transaction_line_items")
 
 # Daily sales summary
 daily_sales = (
@@ -356,7 +365,7 @@ gold_daily_sales.write.format("delta") \
     .mode("overwrite") \
     .partitionBy("year", "month") \
     .option("overwriteSchema", "true") \
-    .saveAsTable(f"{CONFIG['database']}.daily_sales_summary")
+    .saveAsTable(f"{CONFIG['catalog']}.{CONFIG['gold_schema']}.daily_sales_summary")
 
 print(f"✅ Gold Daily Sales Summary Created: {gold_daily_sales.count():,} records")
 
@@ -367,8 +376,9 @@ print(f"✅ Gold Daily Sales Summary Created: {gold_daily_sales.count():,} recor
 
 # COMMAND ----------
 
-silver_customers = spark.table(f"{CONFIG['database']}.customers")
-silver_transactions = spark.table(f"{CONFIG['database']}.transactions")
+# DBTITLE 1,Cell 15
+silver_customers = spark.table(f"{CONFIG['catalog']}.{CONFIG['silver_schema']}.customers")
+silver_transactions = spark.table(f"{CONFIG['catalog']}.{CONFIG['silver_schema']}.transactions")
 
 # Customer transaction summary
 customer_transactions = (
@@ -382,8 +392,8 @@ customer_transactions = (
         F.avg(F.when(F.col("transaction_type") == "purchase", F.col("transaction_amount"))).alias("avg_order_value"),
         F.max(F.when(F.col("transaction_type") == "purchase", F.col("transaction_amount"))).alias("max_order_value"),
         F.sum("total_items").alias("total_items_purchased"),
-        F.min("transaction_date").alias("first_purchase_date"),
-        F.max("transaction_date").alias("last_purchase_date"),
+        F.min("transaction_date").alias("first_transaction_date"),
+        F.max("transaction_date").alias("last_transaction_date"),
         F.countDistinct("store_id").alias("stores_visited"),
         F.countDistinct("channel").alias("channels_used"),
         
@@ -460,7 +470,7 @@ customer_360 = (
 customer_360.write.format("delta") \
     .mode("overwrite") \
     .option("overwriteSchema", "true") \
-    .saveAsTable(f"{CONFIG['database']}.customer_360")
+    .saveAsTable(f"{CONFIG['catalog']}.{CONFIG['gold_schema']}.customer_360")
 
 print(f"✅ Gold Customer 360 Created: {customer_360.count():,} records")
 
@@ -471,15 +481,17 @@ print(f"✅ Gold Customer 360 Created: {customer_360.count():,} records")
 
 # COMMAND ----------
 
-silver_products = spark.table(f"{CONFIG['database']}.products")
-bronze_line_items = spark.table(f"{CONFIG['database']}.transaction_line_items")
-silver_transactions = spark.table(f"{CONFIG['database']}.transactions")
+# DBTITLE 1,Cell 17
+silver_products = spark.table(f"{CONFIG['catalog']}.{CONFIG['silver_schema']}.products")
+bronze_line_items = spark.table(f"{CONFIG['catalog']}.{CONFIG['bronze_schema']}.transaction_line_items")
+silver_transactions = spark.table(f"{CONFIG['catalog']}.{CONFIG['silver_schema']}.transactions")
 
 # Detailed product performance by time period
 product_performance = (
     bronze_line_items
     .join(silver_transactions.select("transaction_id", "transaction_date", "channel", "customer_id"),
           "transaction_id")
+    .drop(bronze_line_items.transaction_date)  # Drop duplicate column from bronze to avoid ambiguity
     .groupBy("product_id")
     .agg(
         F.sum("quantity").alias("total_units_sold"),
@@ -504,6 +516,7 @@ product_performance = (
 # Join with product master data
 gold_product_performance = (
     silver_products
+    .drop("total_revenue", "avg_selling_price", "avg_discount_given", "unique_transactions")  # Drop conflicting columns from silver_products
     .join(product_performance, "product_id", "left")
     .fillna({"total_units_sold": 0, "total_revenue": 0, "unique_customers": 0})
     
@@ -540,7 +553,7 @@ gold_product_performance = (
 gold_product_performance.write.format("delta") \
     .mode("overwrite") \
     .option("overwriteSchema", "true") \
-    .saveAsTable(f"{CONFIG['database']}.product_performance")
+    .saveAsTable(f"{CONFIG['catalog']}.{CONFIG['gold_schema']}.product_performance")
 
 print(f"✅ Gold Product Performance Created: {gold_product_performance.count():,} records")
 
@@ -552,8 +565,8 @@ print(f"✅ Gold Product Performance Created: {gold_product_performance.count():
 # COMMAND ----------
 
 # Store performance aggregation
-bronze_stores = spark.table(f"{CONFIG['database']}.stores")
-silver_transactions = spark.table(f"{CONFIG['database']}.transactions")
+bronze_stores = spark.table(f"{CONFIG['catalog']}.{CONFIG['bronze_schema']}.stores")
+silver_transactions = spark.table(f"{CONFIG['catalog']}.{CONFIG['silver_schema']}.transactions")
 
 store_metrics = (
     silver_transactions
@@ -617,7 +630,7 @@ gold_store_analytics = (
 gold_store_analytics.write.format("delta") \
     .mode("overwrite") \
     .option("overwriteSchema", "true") \
-    .saveAsTable(f"{CONFIG['database']}.store_analytics")
+    .saveAsTable(f"{CONFIG['catalog']}.{CONFIG['gold_schema']}.store_analytics")
 
 print(f"✅ Gold Store Analytics Created: {gold_store_analytics.count():,} records")
 
@@ -633,11 +646,12 @@ print(f"✅ Gold Store Analytics Created: {gold_store_analytics.count():,} recor
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 22
 # Optimize gold tables for query performance
 optimization_jobs = [
     ("gold.daily_sales_summary", ["transaction_date", "channel"]),
-    ("gold.customer_360", ["value_segment", "customer_segment"]),
-    ("gold.product_performance", ["category", "performance_class"]),
+    ("gold.customer_360", ["customer_segment"]),  # Removed value_segment (no stats collected)
+    ("gold.product_performance", ["category"]),
     ("gold.store_analytics", ["state", "performance_tier"]),
     ("silver.transactions", ["customer_id", "transaction_date"]),
 ]
@@ -645,7 +659,7 @@ optimization_jobs = [
 for table, zorder_cols in optimization_jobs:
     print(f"Optimizing {table}...")
     spark.sql(f"""
-        OPTIMIZE {CONFIG['database']}.{table} 
+        OPTIMIZE {CONFIG['catalog']}.{table} 
         ZORDER BY ({', '.join(zorder_cols)})
     """)
     print(f"  ✅ Done")
@@ -666,7 +680,7 @@ tables = [
 
 for table in tables:
     print(f"Computing statistics for {table}...")
-    spark.sql(f"ANALYZE TABLE {CONFIG['database']}.{table} COMPUTE STATISTICS FOR ALL COLUMNS")
+    spark.sql(f"ANALYZE TABLE {CONFIG['catalog']}.{table} COMPUTE STATISTICS FOR ALL COLUMNS")
     print(f"  ✅ Done")
 
 # COMMAND ----------
@@ -685,7 +699,7 @@ cdf_tables = [
 
 for table in cdf_tables:
     spark.sql(f"""
-        ALTER TABLE {CONFIG['database']}.{table}
+        ALTER TABLE {CONFIG['catalog']}.{table}
         SET TBLPROPERTIES (delta.enableChangeDataFeed = true)
     """)
     print(f"✅ CDF enabled on {table}")
@@ -714,7 +728,7 @@ for layer, tables in layers.items():
     print("-" * 40)
     for table in tables:
         try:
-            count = spark.table(f"{CONFIG['database']}.{layer.lower()}.{table}").count()
+            count = spark.table(f"{CONFIG['catalog']}.{layer.lower()}.{table}").count()
             total_rows += count
             print(f"  {table:30} {count:>15,} rows")
         except Exception as e:

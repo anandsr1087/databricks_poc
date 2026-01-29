@@ -1,13 +1,13 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # 02 - Streaming Pipeline
-# MAGIC 
+# MAGIC
 # MAGIC This notebook demonstrates high-throughput streaming ingestion using:
 # MAGIC - **Structured Streaming** with Delta Lake
 # MAGIC - **Auto Loader** for incremental file ingestion
 # MAGIC - **Trigger.AvailableNow** for efficient micro-batch processing
 # MAGIC - **Streaming aggregations** with watermarking
-# MAGIC 
+# MAGIC
 # MAGIC **Target**: 10K-100K events/second throughput
 
 # COMMAND ----------
@@ -17,9 +17,10 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 3
 CONFIG = {
     "catalog": "sourcefuse_poc",
-    "checkpoint_base": "/tmp/checkpoints/sourcefuse_poc",
+    "checkpoint_base": "/Volumes/workspace/default/streaming_checkpoints",
     "s3_landing_zone": "s3://databricks-storage-7474650844180840/sourcefuse_poc/landing",  # Update with your bucket
     "events_per_second": 50000,  # Target throughput
     "batch_interval": "10 seconds"
@@ -31,7 +32,7 @@ spark.sql(f"USE CATALOG {CONFIG['catalog']}")
 
 # MAGIC %md
 # MAGIC ## Part 1: Clickstream Event Streaming
-# MAGIC 
+# MAGIC
 # MAGIC Simulates real-time clickstream ingestion with:
 # MAGIC - High-throughput event processing
 # MAGIC - Schema enforcement
@@ -61,7 +62,7 @@ clickstream_schema = StructType([
 
 # MAGIC %md
 # MAGIC ### Option A: Rate Source (For POC Demonstration)
-# MAGIC 
+# MAGIC
 # MAGIC Use Spark's built-in rate source to simulate high-throughput streaming
 
 # COMMAND ----------
@@ -125,6 +126,7 @@ clickstream_stream = (
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 9
 # Write clickstream to bronze Delta table
 clickstream_query = (
     clickstream_stream
@@ -134,7 +136,7 @@ clickstream_query = (
     .option("checkpointLocation", f"{CONFIG['checkpoint_base']}/clickstream_bronze")
     .option("mergeSchema", "true")
     .partitionBy("event_date", "event_hour")
-    .trigger(processingTime=CONFIG["batch_interval"])
+    .trigger(availableNow=True)
     .toTable(f"{CONFIG['catalog']}.bronze.clickstream_events")
 )
 
@@ -191,7 +193,7 @@ def monitor_stream(query, duration_seconds=60, interval_seconds=10):
 
 # MAGIC %md
 # MAGIC ## Part 2: Streaming Aggregations (Silver Layer)
-# MAGIC 
+# MAGIC
 # MAGIC Real-time metrics with windowed aggregations and watermarking
 
 # COMMAND ----------
@@ -201,7 +203,8 @@ def monitor_stream(query, duration_seconds=60, interval_seconds=10):
 
 # COMMAND ----------
 
-from pyspark.sql.functions import window, count, countDistinct, sum as spark_sum, avg
+# DBTITLE 1,Cell 14
+from pyspark.sql.functions import window, count, countDistinct, approx_count_distinct, sum as spark_sum, avg
 
 # Read from bronze clickstream as stream
 clickstream_bronze = (
@@ -221,8 +224,8 @@ session_metrics = (
     )
     .agg(
         count("*").alias("event_count"),
-        countDistinct("session_id").alias("unique_sessions"),
-        countDistinct("customer_id").alias("unique_customers"),
+        approx_count_distinct("session_id").alias("unique_sessions"),
+        approx_count_distinct("customer_id").alias("unique_customers"),
         spark_sum(F.when(col("event_type") == "product_view", 1).otherwise(0)).alias("product_views"),
         spark_sum(F.when(col("event_type") == "add_to_cart", 1).otherwise(0)).alias("add_to_carts"),
         spark_sum(F.when(col("event_type") == "checkout_complete", 1).otherwise(0)).alias("checkouts")
@@ -239,9 +242,9 @@ session_metrics_query = (
     session_metrics
     .writeStream
     .format("delta")
-    .outputMode("update")  # Update mode for aggregations
+    .outputMode("Complete")  # Update mode for aggregations
     .option("checkpointLocation", f"{CONFIG['checkpoint_base']}/session_metrics_silver")
-    .trigger(processingTime="30 seconds")
+    .trigger(availableNow=True)
     .toTable(f"{CONFIG['catalog']}.silver.session_metrics")
 )
 
@@ -254,6 +257,7 @@ print("✅ Session metrics streaming aggregation started")
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 16
 # Product trending - which products are hot right now
 product_trending = (
     clickstream_bronze
@@ -265,7 +269,7 @@ product_trending = (
     )
     .agg(
         count("*").alias("total_events"),
-        countDistinct("session_id").alias("unique_viewers"),
+        approx_count_distinct("session_id").alias("unique_viewers"),
         spark_sum(F.when(col("event_type") == "product_view", 1).otherwise(0)).alias("views"),
         spark_sum(F.when(col("event_type") == "add_to_cart", 1).otherwise(0)).alias("cart_adds"),
         spark_sum(F.when(col("event_type") == "checkout_complete", 1).otherwise(0)).alias("purchases")
@@ -281,9 +285,9 @@ product_trending_query = (
     product_trending
     .writeStream
     .format("delta")
-    .outputMode("update")
-    .option("checkpointLocation", f"{CONFIG['checkpoint_base']}/product_trending_silver")
-    .trigger(processingTime="30 seconds")
+    .outputMode("complete")
+    .option("checkpointLocation", f"{CONFIG['checkpoint_base']}/product_trending_silver_v2")
+    .trigger(availableNow=True)
     .toTable(f"{CONFIG['catalog']}.silver.product_trending")
 )
 
@@ -293,7 +297,7 @@ print("✅ Product trending streaming started")
 
 # MAGIC %md
 # MAGIC ## Part 3: Auto Loader for File-based Streaming
-# MAGIC 
+# MAGIC
 # MAGIC Demonstrates incremental file ingestion from S3/ADLS
 
 # COMMAND ----------
@@ -350,6 +354,7 @@ autoloader_schema = StructType([
 
 # COMMAND ----------
 
+# DBTITLE 1,Stream-to-Static Join: Enrich Clickstream
 # Read customers as static (for stream-static join)
 customers_df = spark.table(f"{CONFIG['catalog']}.bronze.customers").select(
     "customer_id", "customer_segment", "state", "lifetime_value"
@@ -374,7 +379,7 @@ enriched_query = (
     .outputMode("append")
     .option("checkpointLocation", f"{CONFIG['checkpoint_base']}/enriched_clickstream")
     .partitionBy("event_date")
-    .trigger(processingTime="30 seconds")
+    .trigger(availableNow=True)
     .toTable(f"{CONFIG['catalog']}.silver.clickstream_enriched")
 )
 
@@ -387,6 +392,7 @@ print("✅ Enriched clickstream stream started")
 
 # COMMAND ----------
 
+# DBTITLE 1,Real-time Dashboard Metrics
 # Create a streaming dashboard view updated every 10 seconds
 dashboard_metrics = (
     clickstream_bronze
@@ -396,8 +402,8 @@ dashboard_metrics = (
     )
     .agg(
         count("*").alias("events_per_minute"),
-        countDistinct("session_id").alias("active_sessions"),
-        countDistinct("customer_id").alias("active_customers"),
+        approx_count_distinct("session_id").alias("active_sessions"),
+        approx_count_distinct("customer_id").alias("active_customers"),
         spark_sum(F.when(col("event_type") == "checkout_complete", 1).otherwise(0)).alias("conversions")
     )
     .withColumn("timestamp", col("window.end"))
@@ -409,9 +415,9 @@ dashboard_query = (
     dashboard_metrics
     .writeStream
     .format("delta")
-    .outputMode("update")
+    .outputMode("complete")
     .option("checkpointLocation", f"{CONFIG['checkpoint_base']}/dashboard_metrics")
-    .trigger(processingTime="10 seconds")
+    .trigger(availableNow=True)
     .toTable(f"{CONFIG['catalog']}.gold.realtime_dashboard")
 )
 
@@ -457,6 +463,32 @@ def stop_all_streams():
     print("\n✅ All streams stopped")
 
 # Uncomment to stop: stop_all_streams()
+
+# COMMAND ----------
+
+# DBTITLE 1,Clear Checkpoint (if needed)
+# Delete a specific checkpoint if you encounter table ID conflicts
+# Uncomment and modify the checkpoint name as needed
+
+def clear_checkpoint(checkpoint_name):
+    """Delete a specific checkpoint directory"""
+    checkpoint_path = f"{CONFIG['checkpoint_base']}/{checkpoint_name}"
+    print(f"Deleting checkpoint: {checkpoint_path}")
+    
+    try:
+        dbutils.fs.rm(checkpoint_path, recurse=True)
+        print(f"✅ Checkpoint deleted successfully")
+        print(f"\nYou can now restart the streaming query.")
+    except Exception as e:
+        print(f"⚠️ Error: {e}")
+        print("The checkpoint may not exist, which is fine.")
+
+# Example usage (uncomment to use):
+# clear_checkpoint("dashboard_metrics")
+# clear_checkpoint("session_metrics_silver")
+# clear_checkpoint("product_trending_silver_v2")
+# clear_checkpoint("enriched_clickstream")
+# clear_checkpoint("clickstream_bronze")
 
 # COMMAND ----------
 
